@@ -1,6 +1,6 @@
 def is_cyrillic(text):
-    # Check if any character in the text is in the Cyrillic Unicode range
-    return any('А' <= char <= 'я' or 'Ё' <= char <= 'ё' for char in text)
+    # Check if any character in the text is Cyrillic (whole Unicode block, incl. ў қ ғ ҳ)
+    return any('Ѐ' <= char <= 'ӿ' for char in text)
 
 def is_latin(text):
     # Check if any character in the text is in the Latin Unicode range
