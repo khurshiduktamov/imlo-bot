@@ -57,10 +57,29 @@ def conn():
             CREATE INDEX IF NOT EXISTS events_ts ON events(ts);
             CREATE INDEX IF NOT EXISTS events_user_ts ON events(user_id, ts);
         """)
-        # columns added after the first release
+        # columns and tables added after the first release
         existing = {r["name"] for r in _conn.execute("PRAGMA table_info(users)")}
         if "mode" not in existing:
             _conn.execute("ALTER TABLE users ADD COLUMN mode TEXT DEFAULT 'check'")
+        if "premium_until" not in existing:
+            _conn.execute("ALTER TABLE users ADD COLUMN premium_until INTEGER DEFAULT 0")
+        _conn.executescript("""
+            CREATE TABLE IF NOT EXISTS payments (
+                charge_id  TEXT PRIMARY KEY,   -- telegram_payment_charge_id, needed for refunds
+                user_id    INTEGER NOT NULL,
+                amount     INTEGER NOT NULL,   -- in Stars
+                payload    TEXT,
+                ts         INTEGER NOT NULL,
+                refunded   INTEGER DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS events_kind_ts ON events(kind, ts);
+        """)
+        # let the deploy user (same group) read/write the data folder too
+        for path in (os.path.dirname(DB_PATH), DB_PATH):
+            try:
+                os.chmod(path, 0o775 if os.path.isdir(path) else 0o664)
+            except OSError:
+                pass
     return _conn
 
 
@@ -100,6 +119,83 @@ def get_latin_variant(user_id):
 
 def set_latin_variant(user_id, variant):
     conn().execute("UPDATE users SET latin_variant=? WHERE user_id=?", (variant, user_id))
+
+
+def add_event(user_id, chat_id, kind):
+    conn().execute("INSERT INTO events (ts, user_id, chat_id, kind) VALUES (?, ?, ?, ?)",
+                   (int(time.time()), user_id, chat_id, kind))
+
+
+def today_start():
+    """Unix time of today's midnight in Tashkent."""
+    now = datetime.now(TASHKENT)
+    return int(datetime.combine(now.date(), datetime.min.time(), TASHKENT).timestamp())
+
+
+def files_today(user_id):
+    """Files processed for this user since midnight (Tashkent time)."""
+    return _one("SELECT COUNT(*) FROM events WHERE user_id=? AND kind='file_job' AND ts>=?",
+                user_id, today_start())
+
+
+# ---------------------------------------------------------------- premium
+
+def premium_until(user_id):
+    row = conn().execute("SELECT premium_until FROM users WHERE user_id=?", (user_id,)).fetchone()
+    return (row["premium_until"] or 0) if row else 0
+
+
+def is_premium(user_id):
+    return premium_until(user_id) > time.time()
+
+
+def extend_premium(user_id, days):
+    """Add days of Premium (from now, or from the current end if still active). Returns new end."""
+    until = max(premium_until(user_id), int(time.time())) + days * DAY
+    c = conn()
+    # the user normally exists already (they talked to the bot); make sure anyway
+    c.execute("INSERT OR IGNORE INTO users (user_id, first_seen, last_seen) VALUES (?, ?, ?)",
+              (user_id, int(time.time()), int(time.time())))
+    c.execute("UPDATE users SET premium_until=? WHERE user_id=?", (until, user_id))
+    return until
+
+
+def record_payment(charge_id, user_id, amount, payload):
+    """Store a payment. Returns False if it was already stored (Telegram re-sent the update)."""
+    cur = conn().execute("INSERT OR IGNORE INTO payments (charge_id, user_id, amount, payload, ts) "
+                         "VALUES (?, ?, ?, ?, ?)", (charge_id, user_id, amount, payload, int(time.time())))
+    return cur.rowcount == 1
+
+
+def get_payment(charge_id):
+    row = conn().execute("SELECT * FROM payments WHERE charge_id=?", (charge_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def mark_refunded(charge_id, days):
+    """Flag the payment as refunded and take back its Premium days."""
+    p = get_payment(charge_id)
+    c = conn()
+    c.execute("UPDATE payments SET refunded=1 WHERE charge_id=?", (charge_id,))
+    until = max(int(time.time()), premium_until(p["user_id"]) - days * DAY)
+    c.execute("UPDATE users SET premium_until=? WHERE user_id=?", (until, p["user_id"]))
+
+
+def broadcast_targets():
+    """User ids that have not blocked the bot (their private chat id is the same as the user id)."""
+    return [r[0] for r in conn().execute("SELECT user_id FROM users WHERE blocked=0 ORDER BY last_seen DESC")]
+
+
+def backup_bytes():
+    """A consistent copy of the whole database as bytes (safe while the bot is running)."""
+    # own connection: this runs in a worker thread, and sqlite connections are per-thread
+    src = sqlite3.connect(DB_PATH)
+    dst = sqlite3.connect(":memory:")
+    src.backup(dst)
+    src.close()
+    data = dst.serialize()
+    dst.close()
+    return data
 
 
 def get_mode(user_id):
@@ -143,6 +239,13 @@ def stats():
     s["daily"] = [((today - timedelta(days=i)).isoformat(), by_day.get((today - timedelta(days=i)).isoformat(), 0))
                   for i in range(13, -1, -1)]
     s["tracking_since"] = _one("SELECT MIN(ts) FROM events")
+    s["premium_active"] = _one("SELECT COUNT(*) FROM users WHERE premium_until>?", now)
+    s["files_done_today"] = _one("SELECT COUNT(*) FROM events WHERE kind='file_job' AND ts>=?", today_start())
+    s["inline_7d"] = _one("SELECT COUNT(DISTINCT user_id) FROM events WHERE kind='inline' AND ts>=?", now - 7 * DAY)
+    for label, days in (("30d", 30), ("all", 100_000)):
+        row = c.execute("SELECT COUNT(*), COALESCE(SUM(amount), 0) FROM payments WHERE refunded=0 AND ts>=?",
+                        (now - days * DAY,)).fetchone()
+        s[f"payments_{label}"], s[f"stars_{label}"] = row[0], row[1]
     return s
 
 
