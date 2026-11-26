@@ -1471,7 +1471,37 @@ def latin_new_to_old(text):
     return re.sub('|'.join(pairs), lambda m: pairs[m.group(0)], text)
 
 
+# Parts of a text that must never be transliterated or spell-checked
+PROTECTED_RE = re.compile(
+    r'(?:https?://|www\.)\S+'                       # links
+    r'|[\w.+-]+@[\w-]+(?:\.[\w-]+)+'                 # emails
+    r'|(?<![\w@])@\w+'                               # @mentions
+    r'|\b[\w-]+\.(?:uz|com|ru|org|net|io|me)\b(?:/\S*)?',  # bare domains: kun.uz
+    re.IGNORECASE)
+
+
+def protected_spans(text):
+    """(start, end) of links, emails and @mentions in text."""
+    return [m.span() for m in PROTECTED_RE.finditer(text)]
+
+
 def convert(text, target, new_alphabet=None):
+    """Like _convert, but leaves links, emails and @mentions untouched."""
+    spans = protected_spans(text)
+    if not spans:
+        return _convert(text, target, new_alphabet)
+    if new_alphabet is None:
+        new_alphabet = is_new_latin(text)
+    out, pos = [], 0
+    for start, end in spans:
+        out.append(_convert(text[pos:start], target, new_alphabet))
+        out.append(text[start:end])
+        pos = end
+    out.append(_convert(text[pos:], target, new_alphabet))
+    return ''.join(out)
+
+
+def _convert(text, target, new_alphabet=None):
     """Convert any Uzbek text (Cyrillic, old Latin, new Latin or a mix) to target:
     'cyrillic', 'latin_new' or 'latin_old'.
     new_alphabet: whether Latin parts of the source are in the new alphabet;
