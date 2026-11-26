@@ -57,6 +57,10 @@ def conn():
             CREATE INDEX IF NOT EXISTS events_ts ON events(ts);
             CREATE INDEX IF NOT EXISTS events_user_ts ON events(user_id, ts);
         """)
+        # columns added after the first release
+        existing = {r["name"] for r in _conn.execute("PRAGMA table_info(users)")}
+        if "mode" not in existing:
+            _conn.execute("ALTER TABLE users ADD COLUMN mode TEXT DEFAULT 'check'")
     return _conn
 
 
@@ -96,6 +100,16 @@ def get_latin_variant(user_id):
 
 def set_latin_variant(user_id, variant):
     conn().execute("UPDATE users SET latin_variant=? WHERE user_id=?", (variant, user_id))
+
+
+def get_mode(user_id):
+    """What plain text messages do: 'check' (spell check) or 'convert' (change alphabet)."""
+    row = conn().execute("SELECT mode FROM users WHERE user_id=?", (user_id,)).fetchone()
+    return row["mode"] if row and row["mode"] in ("check", "convert") else "check"
+
+
+def set_mode(user_id, mode):
+    conn().execute("UPDATE users SET mode=? WHERE user_id=?", (mode, user_id))
 
 
 def _one(sql, *args):

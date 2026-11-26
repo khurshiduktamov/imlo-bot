@@ -11,7 +11,8 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ChatType, ParseMode
 from aiogram.filters import Command, CommandStart
 from aiogram.types import (BotCommand, BufferedInputFile, CallbackQuery, ChatMemberUpdated,
-                           InlineKeyboardButton, InlineKeyboardMarkup, Message)
+                           InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, Message,
+                           ReplyKeyboardMarkup)
 from dotenv import load_dotenv
 
 import db
@@ -67,6 +68,8 @@ class TrackMiddleware(BaseMiddleware):
                 kind = "file"
             elif event.text and event.text.startswith("/"):
                 kind = "command"
+            elif event.text and event.text in ALL_MENU_TEXTS:
+                kind = "button"
             elif event.text:
                 kind = "text"
             else:
@@ -88,25 +91,85 @@ async def on_block_change(update: ChatMemberUpdated) -> None:
     db.set_blocked(update.from_user.id, update.new_chat_member.status == "kicked")
 
 
-# ---------------------------------------------------------------- commands
+# ---------------------------------------------------------------- menu
+
+# Bottom menu buttons, written in the old alphabet; shown in the user's alphabet.
+MENU = {
+    "check": "✍️ Imlo tekshirish",
+    "convert": "🔤 Matnni oʻgirish",
+    "file": "📄 Fayl bilan ishlash",
+    "settings": "⚙️ Sozlamalar",
+    "help": "ℹ️ Yordam",
+}
+
+
+def menu_texts(key):
+    """A button press arrives as its label; accept it in both alphabets."""
+    return {MENU[key], latin_old_to_new(MENU[key])}
+
+
+ALL_MENU_TEXTS = set().union(*(menu_texts(k) for k in MENU))
+
+
+def main_keyboard(variant):
+    b = {k: KeyboardButton(text=ui(v, variant)) for k, v in MENU.items()}
+    return ReplyKeyboardMarkup(
+        keyboard=[[b["check"], b["convert"]], [b["file"], b["settings"]], [b["help"]]],
+        resize_keyboard=True, is_persistent=True,
+        input_field_placeholder=ui("Matn yoki fayl yuboring...", variant),
+    )
+
+
+def private_keyboard(message, variant):
+    """The menu keyboard only in private chats: in groups it would cover everyone's screen."""
+    return main_keyboard(variant) if message.chat.type == ChatType.PRIVATE else None
+
 
 @dp.message(CommandStart())
 @dp.message(Command("help"))
+@dp.message(F.text.in_(menu_texts("help")))
 async def command_start_handler(message: Message) -> None:
     variant = db.get_latin_variant(message.from_user.id)
     text = ui(
         "Assalomu alaykum, {name}!\n\n"
-        "Men oʻzbek tilidagi imlo xatolarni tekshiraman.\n\n"
-        "✍️ <b>Matn yuboring</b> — har bir soʻzni tekshirib, xato boʻlsa toʻgʻri variantlarini koʻrsataman. "
-        "Kirill yoki lotin alifbosida yozishingiz mumkin.\n\n"
-        "📄 <b>.docx yoki .txt fayl yuboring</b> — uni boshqa alifboga oʻgirib beraman "
-        "yoki imlo xatolarni belgilab qaytaraman.\n\n",
+        "Men oʻzbek tilidagi matnlar bilan ishlayman:\n\n"
+        "✍️ <b>Imlo tekshirish</b> — matn yuboring, har bir soʻzni tekshirib, "
+        "xato boʻlsa toʻgʻri variantlarini koʻrsataman.\n\n"
+        "🔤 <b>Matnni oʻgirish</b> — matnni kirill, yangi lotin yoki eski lotin alifbosiga oʻgiraman.\n\n"
+        "📄 <b>Fayl bilan ishlash</b> — .docx yoki .txt faylni oʻgirib beraman "
+        "yoki undagi imlo xatolarni belgilab qaytaraman.\n\n"
+        "Pastdagi tugmalardan foydalaning.\n\n",
         variant,
     ).format(name=html.quote(message.from_user.full_name))
     text += ("🆕 Yangi lotin alifbosi (2026): Oʻ → Ö, Gʻ → Ğ, Sh → Ş, Ch → Ç\n"
-             + ui("Lotin alifbosidagi javoblarim: <b>{label}</b>. Oʻzgartirish: /settings", variant)
+             + ui("Lotin alifbosidagi javoblarim: <b>{label}</b>", variant)
              .format(label=LATIN_LABELS[variant]))
-    await message.answer(text)
+    await message.answer(text, reply_markup=private_keyboard(message, variant))
+
+
+@dp.message(F.text.in_(menu_texts("check")))
+async def menu_check(message: Message) -> None:
+    variant = db.get_latin_variant(message.from_user.id)
+    db.set_mode(message.from_user.id, "check")
+    await message.answer(ui("✍️ Tekshirish uchun matn yuboring.", variant))
+
+
+@dp.message(F.text.in_(menu_texts("convert")))
+async def menu_convert(message: Message) -> None:
+    variant = db.get_latin_variant(message.from_user.id)
+    db.set_mode(message.from_user.id, "convert")
+    await message.answer(ui("🔤 Oʻgirish uchun matn yuboring, keyin alifboni tanlaysiz.\n\n"
+                            "Imlo tekshirishga qaytish: «Imlo tekshirish» tugmasi.", variant))
+
+
+@dp.message(F.text.in_(menu_texts("file")))
+async def menu_file(message: Message) -> None:
+    variant = db.get_latin_variant(message.from_user.id)
+    await message.answer(ui(
+        "📎 <b>.docx</b> (Word) yoki <b>.txt</b> fayl yuboring ({mb} MB gacha).\n\n"
+        "Keyin tanlaysiz:\n"
+        "• lotin (yangi yoki eski) yoki kirill alifbosiga oʻgirish\n"
+        "• imlo xatolarni belgilash", variant).format(mb=MAX_FILE_MB))
 
 
 def settings_keyboard(variant):
@@ -118,9 +181,10 @@ def settings_keyboard(variant):
 
 
 @dp.message(Command("settings"))
+@dp.message(F.text.in_(menu_texts("settings")))
 async def command_settings(message: Message) -> None:
     variant = db.get_latin_variant(message.from_user.id)
-    await message.answer(ui("Lotin alifbosidagi javoblar qaysi alifboda boʻlsin?", variant),
+    await message.answer(ui("⚙️ Lotin alifbosidagi javoblar qaysi alifboda boʻlsin?", variant),
                          reply_markup=settings_keyboard(variant))
 
 
@@ -134,8 +198,46 @@ async def on_settings_choice(callback: CallbackQuery) -> None:
     await callback.answer("✅")
     if callback.message and hasattr(callback.message, "edit_text"):
         await callback.message.edit_text(
-            ui("Saqlandi. Endi lotin alifbosidagi javoblar: <b>{label}</b>", variant)
-            .format(label=LATIN_LABELS[variant]))
+            ui("⚙️ Lotin alifbosidagi javoblar qaysi alifboda boʻlsin?", variant),
+            reply_markup=settings_keyboard(variant))
+        if callback.message.chat.type == ChatType.PRIVATE:
+            # refresh the bottom menu so its labels use the chosen alphabet
+            await callback.message.answer(
+                ui("✅ Saqlandi: <b>{label}</b>", variant).format(label=LATIN_LABELS[variant]),
+                reply_markup=main_keyboard(variant))
+
+
+# ---------------------------------------------------------------- convert text
+
+def convert_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Lotin (yangi): ö ğ ş ç", callback_data="t:latin_new")],
+        [InlineKeyboardButton(text="Lotin (eski): oʻ gʻ sh ch", callback_data="t:latin_old")],
+        [InlineKeyboardButton(text="Кирилл", callback_data="t:cyrillic")],
+    ])
+
+
+async def ask_convert_target(message: Message, variant) -> None:
+    # The menu replies to the user's text, so the button handler finds the text through it
+    await message.reply(ui("Qaysi alifboga oʻgiray?", variant), reply_markup=convert_keyboard())
+
+
+@dp.callback_query(F.data.startswith("t:"))
+async def on_convert_text(callback: CallbackQuery, bot: Bot) -> None:
+    variant = db.get_latin_variant(callback.from_user.id)
+    target = callback.data[2:]
+    source = getattr(callback.message, "reply_to_message", None)
+    if not source or not source.text or target not in TARGET_LABELS:
+        await callback.answer(ui("Matn topilmadi. Uni qayta yuboring.", variant), show_alert=True)
+        return
+    await callback.answer()
+    result = await asyncio.to_thread(convert, source.text, target)
+    if len(result) > MESSAGE_LIMIT:
+        await source.reply_document(BufferedInputFile(result.encode("utf-8"), filename=f"matn_{TARGET_LABELS[target][0]}.txt"))
+        return
+    if html.quote(result) != getattr(callback.message, "html_text", None):
+        # show the result in place of the menu; the buttons stay to try another alphabet
+        await callback.message.edit_text(html.quote(result), reply_markup=convert_keyboard())
 
 
 @dp.message(Command("id"))
@@ -162,7 +264,7 @@ async def command_stats(message: Message) -> None:
         f"24h: <b>{s['active_1d']}</b> · 7d: <b>{s['active_7d']}</b> · 30d: <b>{s['active_30d']}</b>\n\n"
         "<b>New users</b>\n"
         f"24h: {s['new_1d']} · 7d: {s['new_7d']} · 30d: {s['new_30d']}\n\n"
-        "<b>Text checks</b>\n"
+        "<b>Texts sent</b> (spell check or convert)\n"
         f"24h: {s['texts_1d']} · 7d: {s['texts_7d']} · 30d: {s['texts_30d']}\n\n"
         "<b>Files</b>\n"
         f"24h: {s['files_1d']} · 7d: {s['files_7d']} · 30d: {s['files_30d']}\n\n"
@@ -276,6 +378,9 @@ async def imloCheck(message: Message) -> None:
     if message.text.startswith("/"):
         return  # unknown command (or an admin command from a non-admin): not text to check
     variant = db.get_latin_variant(message.from_user.id)
+    if db.get_mode(message.from_user.id) == "convert":
+        await ask_convert_target(message, variant)
+        return
     words = [word for _, _, word in tokenize(message.text)]
     if not words:
         return
@@ -363,7 +468,8 @@ def split_message(text):
 @dp.message(F.chat.type == ChatType.PRIVATE)
 async def other_messages(message: Message) -> None:
     variant = db.get_latin_variant(message.from_user.id)
-    await message.answer(ui("Menga matn yoki .docx / .txt fayl yuboring.", variant))
+    await message.answer(ui("Menga matn yoki .docx / .txt fayl yuboring.", variant),
+                         reply_markup=main_keyboard(variant))
 
 
 async def main() -> None:
@@ -372,6 +478,7 @@ async def main() -> None:
     await bot.set_my_commands([
         BotCommand(command="start", description="Boshlash"),
         BotCommand(command="settings", description="Lotin alifbosi: yangi yoki eski"),
+        BotCommand(command="help", description="Yordam"),
     ])
     db.conn()  # create the database on startup
     logging.info("Admins: %s", ADMIN_IDS or "none (set ADMIN_IDS in .env)")
