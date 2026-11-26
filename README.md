@@ -279,3 +279,29 @@ If you need help or have questions:
 **Made with ❤️ for the Uzbek language community**
 
 *If this project helped you, please consider giving it a star ⭐*
+
+## ⚙️ Operations (production on alwaysdata)
+
+**Deploy:** commit, then run `./deploy.sh`. It checks the code, backs up the server code
+(last 10 in `~/deploy_backups/`), uploads, verifies checksums and restarts the bot
+(the bot exits when `~/.restart_request` changes; alwaysdata starts it again).
+
+**`.env` on the server**
+
+| Key | Meaning |
+|-----|---------|
+| `BOT_TOKEN` | from @BotFather |
+| `ADMIN_IDS` | admin Telegram ids, comma-separated |
+| `SUPPORT_CONTACT` | shown by `/paysupport`, e.g. `@username` (optional) |
+
+**alwaysdata service:** command `python main.py`, monitoring command `python healthcheck.py`
+(restarts the bot if its heartbeat in `data/heartbeat` is older than 3 minutes).
+
+**Admin commands** (private chat only): `/admin`, `/stats`, `/users`, `/broadcast` (reply to a post),
+`/givepremium <user_id> [days]`, `/refund <charge_id>`, `/backup`.
+Errors are sent to admins on Telegram; a database backup arrives daily at 03:00 (Tashkent).
+
+**Premium:** 5 free files/day (10 MB); Premium = unlimited files, 20 MB, 150 Telegram Stars for 30 days.
+Settings are at the top of `common.py`.
+
+**Inline mode** must be enabled once in @BotFather: `/setinline`.
