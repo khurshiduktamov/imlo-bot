@@ -1,4 +1,8 @@
 # -*- coding: utf-8 -*-
+# Based on uzbek-transliterator by kodchi: https://github.com/kodchi/uzbek-transliterator
+# Licensed under the GNU General Public License v2.0 (GPL-2.0).
+# Modified for this bot: 2026 Latin alphabet (ö ğ ş ç), old<->new Latin conversion,
+# precompiled patterns and bug fixes.
 import re
 import sys
 
