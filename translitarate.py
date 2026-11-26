@@ -28,10 +28,41 @@ LATIN_TO_CYRILLIC = {
     'y': 'й', 'Y': 'Й',
     'z': 'з', 'Z': 'З',
     'ʼ': 'ъ',  # TODO: case?
+    # New alphabet (Law OʻRQ-1184, 2026): ş, ç, ö, ğ
+    'ş': 'ш', 'Ş': 'Ш',
+    'ç': 'ч', 'Ç': 'Ч',
+    'ö': 'ў', 'Ö': 'Ў',
+    'ğ': 'ғ', 'Ğ': 'Ғ',
 }
 LATIN_VOWELS = (
-    'a', 'A', 'e', 'E', 'i', 'I', 'o', 'O', 'u', 'U', 'o‘', 'O‘'
+    'a', 'A', 'e', 'E', 'i', 'I', 'o', 'O', 'u', 'U', 'o‘', 'O‘', 'ö', 'Ö'
 )
+
+# Letters that only exist in the new (2026) Latin alphabet. If a text contains
+# any of them, we treat it as written in the new alphabet: "sh"/"ch" are then
+# plain s+h / c+h and an apostrophe after o/g is the tutuq belgisi (ъ).
+NEW_LATIN_LETTERS = set('öÖğĞşŞçÇ')
+# Every apostrophe-like character people type
+APOSTROPHES = "'’ʼʻ‘`"
+NEW_TUTUQ = "'"
+
+
+def is_new_latin(text):
+    return any(char in NEW_LATIN_LETTERS for char in text)
+
+
+def _normalize_apostrophes(text, new_alphabet):
+    """Bring apostrophes to the forms the converter understands:
+    oʻ/gʻ  -> o‘/g‘ (old alphabet only)
+    letter + apostrophe + letter -> ʼ (tutuq belgisi)
+    """
+    if new_alphabet:
+        # ʻ and ‘ are only ever used for oʻ/gʻ, so keep reading them that way
+        text = re.sub(r'([oOgG])[ʻ‘]', r'\1‘', text)
+    else:
+        text = re.sub(r'([oOgG])[%s]' % APOSTROPHES, r'\1‘', text)
+    # whatever apostrophe is left between two letters is the tutuq belgisi
+    return re.sub(r'(?<=\w)[\'’ʼ`ʻ](?=\w)', 'ʼ', text)
 
 # These words cannot be reliably converted to cyrillic because of the lossy
 # nature of the to_latin converter.
@@ -1216,21 +1247,36 @@ CYRILLIC_VOWELS = (
 )
 
 
-def to_cyrillic(text):
+# Compiled once: there are ~750 of them, far more than re's internal cache holds
+_SOFT_SIGN_PATTERNS = [re.compile(r'\b(%s)' % w, re.U | re.I) for w in SOFT_SIGN_WORDS]
+_EXCEPTION_PATTERNS = [re.compile(r'\b(%s)' % w, re.U)
+                       for w in list(TS_WORDS) + list(E_WORDS) + list(SH_WORDS)]
+
+
+def to_cyrillic(text, new_alphabet=None):
     """Transliterate latin text to cyrillic  using the following rules:
     1. ye = е in the beginning of a word or after a vowel
     2. e = э in the beginning of a word or after a vowel
     3. ц exception words
     4. э exception words
+
+    Accepts both the old (oʻ gʻ sh ch) and the new (ö ğ ş ç) Latin alphabet.
+    new_alphabet: None = detect from the text itself.
     """
+    if new_alphabet is None:
+        new_alphabet = is_new_latin(text)
+
     # These compounds must be converted before other letters
     compounds_first = {
-        'ch': 'ч', 'Ch': 'Ч', 'CH': 'Ч',
-        # this line must come before 's' because it has an 'h'
-        'sh': 'ш', 'Sh': 'Ш', 'SH': 'Ш',
         # This line must come before 'yo' because of it's apostrophe
         'yo‘': 'йў', 'Yo‘': 'Йў', 'YO‘': 'ЙЎ',
     }
+    if not new_alphabet:
+        compounds_first.update({
+            'ch': 'ч', 'Ch': 'Ч', 'CH': 'Ч',
+            # this line must come before 's' because it has an 'h'
+            'sh': 'ш', 'Sh': 'Ш', 'SH': 'Ш',
+        })
     compounds_second = {
         'yo': 'ё', 'Yo': 'Ё', 'YO': 'Ё',
         # 'ts': 'ц', 'Ts': 'Ц', 'TS': 'Ц',  # No need for this, see TS_WORDS
@@ -1259,9 +1305,8 @@ def to_cyrillic(text):
         'ya': 'йа', 'Ya': 'Йа', 'YA': 'ЙА',
     }
 
-    # standardize some characters
-    # the first one is the windows string, the second one is the mac string
-    text = text.replace('ʻ', '‘')
+    # standardize apostrophes: oʻ/o'/o’ -> o‘ (old alphabet), tutuq -> ʼ
+    text = _normalize_apostrophes(text, new_alphabet)
 
     def replace_soft_sign_words(m):
         word = m.group(1)
@@ -1274,29 +1319,19 @@ def to_cyrillic(text):
             result = SOFT_SIGN_WORDS[word.lower()]
         return result
 
-    for word in SOFT_SIGN_WORDS:
-        text = re.sub(
-            r'\b(%s)' % word,
-            replace_soft_sign_words,
-            text,
-            flags=re.U
-        )
+    for pattern in _SOFT_SIGN_PATTERNS:
+        text = pattern.sub(replace_soft_sign_words, text)
 
     def replace_exception_words(m):
         """Replace ц (or э) only leaving other characters unchanged"""
         return '%s%s%s' % (
-            m.group(1)[:m.start(2)],
+            m.group(1)[:m.start(2) - m.start(1)],
             exception_words_rules[m.group(2)],
-            m.group(1)[m.end(2):]
+            m.group(1)[m.end(2) - m.start(1):]
         )
     # loop because of python's limit of 100 named groups
-    for word in list(TS_WORDS.keys()) + list(E_WORDS.keys()):
-        text = re.sub(
-            r'\b(%s)' % word,
-            replace_exception_words,
-            text,
-            flags=re.U
-        )
+    for pattern in _EXCEPTION_PATTERNS:
+        text = pattern.sub(replace_exception_words, text)
 
     # compounds
     text = re.sub(
@@ -1338,8 +1373,9 @@ def to_cyrillic(text):
     return text
 
 
-def to_latin(text):
-    """Transliterate cyrillic text to latin using the following rules:
+def to_latin(text, variant='old'):
+    """Transliterate cyrillic text to latin (variant 'old' or 'new' alphabet)
+    using the following rules:
     1. ц = s at the beginning of a word.
     ц = ts in the middle of a word after a vowel.
     ц = s in the middle of a word after consonant (DEFAULT in CYRILLIC_TO_LATIN)
@@ -1383,14 +1419,83 @@ def to_latin(text):
         flags=re.U
     )
 
+    table = CYRILLIC_TO_LATIN_NEW if variant == 'new' else CYRILLIC_TO_LATIN
     text = re.sub(
-        r'(%s)' % '|'.join(CYRILLIC_TO_LATIN.keys()),
-        lambda x: CYRILLIC_TO_LATIN[x.group(1)],
+        r'(%s)' % '|'.join(table.keys()),
+        lambda x: table[x.group(1)],
         text,
         flags=re.U
     )
 
     return text
+
+
+CYRILLIC_TO_LATIN_NEW = {
+    **CYRILLIC_TO_LATIN,
+    'ш': 'ş', 'Ш': 'Ş',
+    'ч': 'ç', 'Ч': 'Ç',
+    'ў': 'ö', 'Ў': 'Ö',
+    'ғ': 'ğ', 'Ғ': 'Ğ',
+    'ъ': NEW_TUTUQ, 'Ъ': NEW_TUTUQ,
+}
+
+
+def latin_old_to_new(text):
+    """oʻ gʻ sh ch ʼ (old Latin) -> ö ğ ş ç ' (new Latin). Cyrillic is left alone."""
+    text = _normalize_apostrophes(text, new_alphabet=False)
+    # asҳоб / мусҳаф are s+h, not ш
+    for word in SH_WORDS:
+        plain = word.replace('(', '').replace(')', '')
+        text = re.sub(r'\b(%s)' % plain, lambda m: m.group(1).replace('sh', 's\0h'),
+                      text, flags=re.IGNORECASE)
+    pairs = {
+        'o‘': 'ö', 'O‘': 'Ö', 'g‘': 'ğ', 'G‘': 'Ğ',
+        'sh': 'ş', 'Sh': 'Ş', 'SH': 'Ş', 'ch': 'ç', 'Ch': 'Ç', 'CH': 'Ç',
+        'ʼ': NEW_TUTUQ,
+    }
+    text = re.sub('|'.join(pairs), lambda m: pairs[m.group(0)], text)
+    return text.replace('\0', '')
+
+
+def latin_new_to_old(text):
+    """ö ğ ş ç ' (new Latin) -> oʻ gʻ sh ch ʼ (old Latin). Cyrillic is left alone."""
+    text = _normalize_apostrophes(text, new_alphabet=True)
+    pairs = {
+        'ö': 'oʻ', 'Ö': 'Oʻ', 'ğ': 'gʻ', 'Ğ': 'Gʻ',
+        'ş': 'sh', 'Ş': 'Sh', 'ç': 'ch', 'Ç': 'Ch',
+    }
+    return re.sub('|'.join(pairs), lambda m: pairs[m.group(0)], text)
+
+
+def convert(text, target, new_alphabet=None):
+    """Convert any Uzbek text (Cyrillic, old Latin, new Latin or a mix) to target:
+    'cyrillic', 'latin_new' or 'latin_old'.
+    new_alphabet: whether Latin parts of the source are in the new alphabet;
+    None = detect from the text. Pass it explicitly when converting a long
+    document piece by piece, so every piece is read the same way.
+    """
+    if new_alphabet is None:
+        new_alphabet = is_new_latin(text)
+    if target == 'cyrillic':
+        return to_cyrillic(text, new_alphabet)
+    if target == 'latin_new':
+        if new_alphabet:
+            # fix stray old oʻ/gʻ and tutuq forms inside new-alphabet text
+            text = _normalize_apostrophes(text, new_alphabet=True)
+            pairs = {'o‘': 'ö', 'O‘': 'Ö', 'g‘': 'ğ', 'G‘': 'Ğ', 'ʼ': NEW_TUTUQ}
+            text = re.sub('|'.join(pairs), lambda m: pairs[m.group(0)], text)
+        else:
+            text = latin_old_to_new(text)
+        return to_latin(text, 'new')
+    if target == 'latin_old':
+        if new_alphabet:
+            text = latin_new_to_old(text)
+        else:
+            text = _normalize_apostrophes(text, new_alphabet=False)
+        # standard old-alphabet forms: oʻ gʻ (U+02BB) and ʼ (U+02BC)
+        text = re.sub(r'([oOgG])‘', r'\1ʻ', text)
+        return to_latin(text, 'old')
+    raise ValueError(target)
 
 
 def transliterate(text, to_variant):

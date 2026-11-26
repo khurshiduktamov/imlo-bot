@@ -2,3 +2,10 @@
 commented_functions.md
 bot.log
 .idea
+.venv/
+__pycache__/
+data/
+*.db
+*.db-wal
+*.db-shm
+bot.log.*
