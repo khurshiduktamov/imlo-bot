@@ -4,6 +4,7 @@ Everything here is synchronous and CPU-bound; the bot runs it in a worker thread
 """
 import copy
 import io
+import zipfile
 from dataclasses import dataclass, field
 from functools import lru_cache
 
@@ -15,15 +16,19 @@ from docx.text.run import Run
 
 from alphabetCheck import is_cyrillic
 from checkWords import is_known, suggest, tokenize
-from translitarate import convert, is_new_latin
+from translitarate import convert, is_new_latin, protected_spans
 
 # Above this many distinct misspelled words we still mark them, but stop looking up
-# suggestions (each lookup takes ~30 ms).
-MAX_SUGGESTION_LOOKUPS = 2000
+# suggestions (each lookup takes ~20 ms here, ~60 ms on the alwaysdata server).
+MAX_SUGGESTION_LOOKUPS = 300
 # Words per file; protects the small server from huge uploads.
 MAX_WORDS = 100_000
+# Total unpacked size of a .docx (a normal 100k-word document is ~20 MB unpacked)
+MAX_UNPACKED_DOCX = 60 * 1024 * 1024
 
 W_P, W_T, W_R, W_RPR = qn('w:p'), qn('w:t'), qn('w:r'), qn('w:rPr')
+# Elements that sit between words inside a run: they separate words but are never rewritten
+SEPARATORS = {qn('w:tab'): '\t', qn('w:br'): '\n', qn('w:cr'): '\n', qn('w:noBreakHyphen'): '-'}
 W_TXBX = qn('w:txbxContent')
 XML_SPACE = qn('xml:space')
 
@@ -46,6 +51,13 @@ def decode_txt(data):
 
 
 def open_docx(data):
+    # A .docx is a zip: refuse "zip bombs" (tiny upload, gigabytes once unpacked) before parsing
+    try:
+        unpacked = sum(i.file_size for i in zipfile.ZipFile(io.BytesIO(data)).infolist())
+    except (zipfile.BadZipFile, ValueError):
+        unpacked = 0  # not a zip at all: Document() below reports it properly
+    if unpacked > MAX_UNPACKED_DOCX:
+        raise FileError("Fayl juda katta. Kichikroq fayl yuboring.")
     try:
         return Document(io.BytesIO(data))
     except Exception:
@@ -74,10 +86,23 @@ def _xml_parts(doc):
 
 def _paragraphs(root):
     for p in root.iter(W_P):
-        # text nodes that belong to this paragraph (not to a text box nested inside it)
-        nodes = [t for t in p.iter(W_T) if _owner_paragraph(t) is p]
-        if nodes:
+        nodes = _paragraph_nodes(p)
+        if any(n.tag == W_T for n in nodes):
             yield p, nodes
+
+
+def _paragraph_nodes(p):
+    """Text nodes and separators (tabs, breaks) of this paragraph, in order, excluding those
+    of text boxes nested inside it."""
+    return [n for n in p.iter(W_T, *SEPARATORS) if _owner_paragraph(n) is p]
+
+
+def node_text(n):
+    return SEPARATORS[n.tag] if n.tag in SEPARATORS else (n.text or '')
+
+
+def _paragraph_text(nodes):
+    return ''.join(node_text(n) for n in nodes)
 
 
 def _owner_paragraph(el):
@@ -94,6 +119,14 @@ def _inside_textbox(el):
             return True
         el = el.getparent()
     return False
+
+
+def words_outside_links(text):
+    """tokenize(text) minus the words that are part of a link, email or @mention."""
+    spans = protected_spans(text)
+    for start, end, word in tokenize(text):
+        if not any(s <= start < e for s, e in spans):
+            yield start, end, word
 
 
 def _count_words(texts):
@@ -115,12 +148,12 @@ def _word_converter(target, new_alphabet):
 def _rewrite_paragraph(nodes, fn):
     """Apply fn to every word of a paragraph whose text is spread over several w:t nodes.
     A converted word is written into the node where it starts, so it keeps that run's formatting."""
-    texts = [n.text or '' for n in nodes]
+    texts = [node_text(n) for n in nodes]
     full = ''.join(texts)
     owner = [i for i, t in enumerate(texts) for _ in t]
     out = [[] for _ in nodes]
     pos = 0
-    for start, end, word in tokenize(full):
+    for start, end, word in words_outside_links(full):
         for k in range(pos, start):
             out[owner[k]].append(full[k])
         new = fn(word)
@@ -133,6 +166,8 @@ def _rewrite_paragraph(nodes, fn):
     for k in range(pos, len(full)):
         out[owner[k]].append(full[k])
     for node, parts in zip(nodes, out):
+        if node.tag != W_T:
+            continue  # separators never change (words never include tabs/breaks)
         text = ''.join(parts)
         if text != (node.text or ''):
             node.text = text
@@ -143,7 +178,7 @@ def convert_docx(data, target):
     """Return the .docx converted to target ('cyrillic', 'latin_new', 'latin_old')."""
     doc = open_docx(data)
     paragraphs = [(p, nodes) for root in _xml_parts(doc) for p, nodes in _paragraphs(root)]
-    all_text = [''.join(n.text or '' for n in nodes) for _, nodes in paragraphs]
+    all_text = [_paragraph_text(nodes) for _, nodes in paragraphs]
     _count_words(all_text)
     # decide once for the whole document whether its Latin is the new alphabet
     conv = _word_converter(target, is_new_latin(''.join(all_text)))
@@ -154,6 +189,8 @@ def convert_docx(data, target):
 
 def convert_txt(data, target):
     text = decode_txt(data)
+    if not text.strip():
+        raise FileError("Faylda matn topilmadi.")
     _count_words([text])
     return convert(text, target).encode('utf-8')
 
@@ -206,14 +243,14 @@ def spellcheck_docx(data, latin_variant, ui=lambda s: s):
     doc = open_docx(data)
     body = doc.element.body
     paragraphs = list(_paragraphs(body))
-    all_text = [''.join(n.text or '' for n in nodes) for _, nodes in paragraphs]
+    all_text = [_paragraph_text(nodes) for _, nodes in paragraphs]
     report = SpellReport(total_words=_count_words(all_text))
     checker = _Checker(is_new_latin(''.join(all_text)), latin_variant)
     commented = set()
 
     for (p, nodes), full in zip(paragraphs, all_text):
         bad = []  # (start, end, word, suggestions)
-        for start, end, word in tokenize(full):
+        for start, end, word in words_outside_links(full):
             report_word = word.lower()
             suggestions = checker.check(word)
             if suggestions is None:
@@ -225,6 +262,9 @@ def spellcheck_docx(data, latin_variant, ui=lambda s: s):
             continue
 
         paragraph = Paragraph(p, None)
+        # one text item per run, so a highlight covers just the word (text is unchanged)
+        if _split_multi_runs(p):
+            nodes = _paragraph_nodes(p)
         word_runs = _highlight(paragraph, nodes, [(s, e) for s, e, _, _ in bad])
         if _inside_textbox(p):
             continue  # comments inside text boxes upset Word; the highlight is enough
@@ -239,13 +279,32 @@ def spellcheck_docx(data, latin_variant, ui=lambda s: s):
     return save_docx(doc), report
 
 
+def _split_multi_runs(p):
+    """Split runs of this paragraph that hold several items (text + tab + break...) into one
+    run per item, each keeping the run's formatting. Returns True if anything changed."""
+    changed = False
+    for r in [r for r in p.iter(W_R) if _owner_paragraph(r) is p]:
+        items = [c for c in r if c.tag != W_RPR]
+        if len(items) < 2 or not any(c.tag == W_T for c in items):
+            continue
+        for item in items:
+            new_r = copy.deepcopy(r)
+            for c in [c for c in new_r if c.tag != W_RPR]:
+                new_r.remove(c)
+            new_r.append(item)  # moves the original item into the new run
+            r.addprevious(new_r)
+        r.getparent().remove(r)
+        changed = True
+    return changed
+
+
 def _highlight(paragraph, nodes, ranges):
     """Split runs so each range (offsets in the paragraph text) gets its own highlighted run(s).
     Returns, for each range, the list of Run objects that make it up."""
     # offsets of every node inside the paragraph text
     spans, pos = [], 0
     for n in nodes:
-        length = len(n.text or '')
+        length = len(node_text(n))
         spans.append((pos, pos + length))
         pos += length
 
@@ -262,7 +321,7 @@ def _highlight(paragraph, nodes, ranges):
             continue
         t = nodes[i]
         r = t.getparent()
-        if r.tag != W_R:
+        if t.tag != W_T or r.tag != W_R:
             continue
         simple = [c for c in r if c.tag != W_RPR] == [t]
         if not simple:
@@ -304,7 +363,7 @@ def spellcheck_txt(data, latin_variant, ui=lambda s: s):
     report = SpellReport(total_words=_count_words([text]))
     checker = _Checker(is_new_latin(text), latin_variant)
     for line_no, line in enumerate(text.splitlines(), 1):
-        for _, _, word in tokenize(line):
+        for _, _, word in words_outside_links(line):
             suggestions = checker.check(word)
             if suggestions is None:
                 continue

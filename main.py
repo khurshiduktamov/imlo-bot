@@ -18,7 +18,7 @@ from dotenv import load_dotenv
 import db
 import fileproc
 from alphabetCheck import is_cyrillic
-from checkWords import checkWord, tokenize
+from checkWords import is_known, suggest
 from translitarate import convert, is_new_latin, latin_old_to_new
 
 # Load environment variables from .env file
@@ -34,6 +34,7 @@ MAX_FILE_MB = 10
 SHORT_TEXT_WORDS = 30    # up to this many words: show every word; above: only the mistakes
 MAX_TEXT_WORDS = 500     # above this: ask for a file instead
 MESSAGE_LIMIT = 4000     # Telegram allows 4096 characters per message
+MAX_TEXT_SUGGESTIONS = 60  # distinct misspelled words per message that get suggestions
 
 # Heavy file jobs run in threads; keep at most 2 at a time on the small server
 file_jobs = asyncio.Semaphore(2)
@@ -235,7 +236,7 @@ async def on_convert_text(callback: CallbackQuery, bot: Bot) -> None:
         return
     await callback.answer()
     result = await asyncio.to_thread(convert, source.text, target)
-    if len(result) > MESSAGE_LIMIT:
+    if len(html.quote(result)) > MESSAGE_LIMIT:
         await source.reply_document(BufferedInputFile(result.encode("utf-8"), filename=f"matn_{TARGET_LABELS[target][0]}.txt"))
         return
     if html.quote(result) != getattr(callback.message, "html_text", None):
@@ -250,7 +251,8 @@ async def command_id(message: Message) -> None:
 
 # ---------------------------------------------------------------- admin
 
-@dp.message(Command("stats"), F.from_user.id.in_(ADMIN_IDS))
+# admin commands only in a private chat with the bot, so stats never leak into a group
+@dp.message(Command("stats"), F.from_user.id.in_(ADMIN_IDS), F.chat.type == ChatType.PRIVATE)
 async def command_stats(message: Message) -> None:
     s = db.stats()
     top = max([n for _, n in s["daily"]] + [1])
@@ -276,7 +278,7 @@ async def command_stats(message: Message) -> None:
     )
 
 
-@dp.message(Command("users"), F.from_user.id.in_(ADMIN_IDS))
+@dp.message(Command("users"), F.from_user.id.in_(ADMIN_IDS), F.chat.type == ChatType.PRIVATE)
 async def command_users(message: Message) -> None:
     data = db.export_users_csv()
     await message.answer_document(BufferedInputFile(data, filename="users.csv"))
@@ -384,7 +386,7 @@ async def imloCheck(message: Message) -> None:
     if db.get_mode(message.from_user.id) == "convert":
         await ask_convert_target(message, variant)
         return
-    words = [word for _, _, word in tokenize(message.text)]
+    words = [word for _, _, word in fileproc.words_outside_links(message.text)]
     if not words:
         return
     if len(words) > MAX_TEXT_WORDS:
@@ -402,18 +404,26 @@ def build_response(text, words, variant):
     new_alphabet = is_new_latin(text)
     short = len(words) <= SHORT_TEXT_WORDS
 
-    response, errors = [], 0
+    response, errors, lookups = [], 0, 0
     seen = set()
     for word in words:
         # Transliterate Latin input to Cyrillic for grammar check
         word_in_cyrillic = word if is_cyrillic(word) else convert(word, 'cyrillic', new_alphabet)
-        result = checkWord(word_in_cyrillic)
-        if not result['available']:
+        key = word_in_cyrillic.lower()
+        known = is_known(key)
+        if not known:
             errors += 1
-        # long texts: list only the mistakes, each once
-        if not short and (result['available'] or word_in_cyrillic.lower() in seen):
+        # every word once; long texts: only the mistakes
+        if key in seen or (not short and known):
             continue
-        seen.add(word_in_cyrillic.lower())
+        seen.add(key)
+        if known:
+            result = {'available': True, 'matches': key}
+        elif lookups < MAX_TEXT_SUGGESTIONS:  # suggestions are slow: cap them per message
+            lookups += 1
+            result = {'available': False, 'matches': suggest(key)}
+        else:
+            result = {'available': False, 'matches': ()}
         response.append(generate_word_response(word_in_cyrillic, result))
 
     if not short:
