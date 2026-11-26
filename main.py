@@ -194,6 +194,9 @@ async def on_settings_choice(callback: CallbackQuery) -> None:
     if variant not in LATIN_LABELS:
         await callback.answer()
         return
+    if variant == db.get_latin_variant(callback.from_user.id):
+        await callback.answer("✅")  # already selected: nothing to change
+        return
     db.set_latin_variant(callback.from_user.id, variant)
     await callback.answer("✅")
     if callback.message and hasattr(callback.message, "edit_text"):
