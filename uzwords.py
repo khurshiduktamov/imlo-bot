@@ -1,3 +1,6 @@
+# Uzbek word list (Cyrillic) from https://github.com/kodchi/uzbek-words by kodchi.
+# Licensed under the GNU General Public License v2.0, see licenses/GPL-2.0.txt.
+# Converted to a Python list for this bot; a few words were added.
 words = ["а",
 "абад",
 "абадий",

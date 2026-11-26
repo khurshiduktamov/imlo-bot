@@ -1,0 +1,23 @@
+Copyright (c) 2024-2026 khurshiduktamov. All rights reserved.
+
+This repository is private. The bot's own code (everything not listed below) may not be
+copied, distributed, sold or published without the copyright holder's written permission.
+
+
+THIRD-PARTY COMPONENTS (GNU General Public License v2.0)
+
+The following files are, or are based on, work by kodchi and are licensed under the
+GNU General Public License, version 2. The full license text is in licenses/GPL-2.0.txt.
+
+  translitarate.py   based on https://github.com/kodchi/uzbek-transliterator
+                     (modified: 2026 Latin alphabet, old<->new Latin conversion,
+                     link protection, precompiled patterns, bug fixes)
+
+  uzwords.py         word list from https://github.com/kodchi/uzbek-words
+                     (converted to a Python list; a few words added)
+
+Note: the GPL applies when the program is distributed (given, sold or published). Running
+the bot as a service does not distribute it. If this code is ever distributed, the GPL-2.0
+terms apply to the whole program that includes these files, and its source must be made
+available under the GPL. Replacing both files with independently written ones removes
+that obligation for future versions.

@@ -1,6 +1,6 @@
 # Imlo Bot - Uzbek Spell Checker
 
-![License](https://img.shields.io/badge/license-MIT-blue.svg)
+![License](https://img.shields.io/badge/license-proprietary%20%2B%20GPL--2.0%20parts-lightgrey.svg)
 ![Python](https://img.shields.io/badge/python-3.x-blue.svg)
 ![Status](https://img.shields.io/badge/status-active-green.svg)
 
@@ -244,10 +244,14 @@ Currently supports:
 
 ## 📄 License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+Private project, all rights reserved, except two third-party files under the GNU GPL v2.0:
+`translitarate.py` (based on [kodchi/uzbek-transliterator](https://github.com/kodchi/uzbek-transliterator)) and
+`uzwords.py` (word list from [kodchi/uzbek-words](https://github.com/kodchi/uzbek-words)).
+See [LICENSE](LICENSE) and [licenses/GPL-2.0.txt](licenses/GPL-2.0.txt). Do not publish or distribute this code.
 
 ## 🙏 Acknowledgments
 
+- [kodchi](https://github.com/kodchi): the Uzbek transliterator and word list this bot builds on
 - Uzbek language experts and linguists
 - Open source spell checking libraries
 - Contributors to Uzbek digital resources
